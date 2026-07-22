@@ -564,11 +564,23 @@ class NBFNet(nn.Module):
 
 
 class SparseRelationalAttentionLayer(nn.Module):
-    """Atencion sparse sobre aristas (segment-softmax por nodo destino) + FFN (pre-LN)."""
+    """Atencion sparse sobre aristas + FFN (pre-LN).
 
-    def __init__(self, hidden_dim, num_heads, num_relation, drop):
+    attn controla la agregacion por nodo destino:
+      - 'softmax': segment-softmax (promedio ponderado convexo; ciego al numero de
+        aristas de soporte y al grado, porque normaliza a sum(alpha)=1).
+      - 'sigmoid': gates sigmoides por arista SIN normalizar => suma ponderada
+        aprendida. Conserva el conteo de caminos de evidencia y la sensibilidad al
+        grado (como la agregacion sum de NBFNet) manteniendo la selectividad por query.
+      - 'degree': segment-softmax reescalado por log(1+grado_in) del destino =>
+        reinyecta el conteo como scaler (estilo PNA) sin abandonar el softmax.
+    """
+
+    def __init__(self, hidden_dim, num_heads, num_relation, drop, attn='softmax'):
         super().__init__()
         assert hidden_dim % num_heads == 0
+        assert attn in ('softmax', 'sigmoid', 'degree')
+        self.attn = attn
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
@@ -609,14 +621,18 @@ class SparseRelationalAttentionLayer(nn.Module):
         logit = (q[:, dst] * k[:, src]).sum(-1) * self.scale
         logit = logit + self.rel_bias[:, rel].transpose(0, 1).unsqueeze(0)  # (1,E,H)
 
-        # Segment-softmax por nodo destino (sobre sus aristas entrantes + self-loop).
-        idx = dst.view(1, E, 1).expand(B, E, H)
-        node_max = logit.new_full((B, N, H), float('-inf'))
-        node_max.scatter_reduce_(1, idx, logit, reduce='amax', include_self=False)
-        logit = (logit - node_max.gather(1, idx)).exp()
-        denom = logit.new_zeros(B, N, H)
-        denom.index_add_(1, dst, logit)
-        alpha = logit / (denom.gather(1, idx) + 1e-9)               # (B, E, H)
+        if self.attn == 'sigmoid':
+            # Gate por arista, sin normalizacion (no necesita estabilizacion por max).
+            alpha = torch.sigmoid(logit)                            # (B, E, H)
+        else:
+            # Segment-softmax por nodo destino (sobre sus aristas entrantes + self-loop).
+            idx = dst.view(1, E, 1).expand(B, E, H)
+            node_max = logit.new_full((B, N, H), float('-inf'))
+            node_max.scatter_reduce_(1, idx, logit, reduce='amax', include_self=False)
+            logit = (logit - node_max.gather(1, idx)).exp()
+            denom = logit.new_zeros(B, N, H)
+            denom.index_add_(1, dst, logit)
+            alpha = logit / (denom.gather(1, idx) + 1e-9)           # (B, E, H)
         alpha = self.drop(alpha)
 
         # Mensaje relacional (composicion DistMult) ponderado por la atencion.
@@ -624,6 +640,11 @@ class SparseRelationalAttentionLayer(nn.Module):
         msg = alpha.unsqueeze(-1) * v[:, src] * g
         out = msg.new_zeros(B, N, H, hd)
         out.index_add_(1, dst, msg)                                # (B, N, H, hd)
+
+        if self.attn == 'degree':
+            deg = torch.zeros(N, device=x.device)
+            deg.index_add_(0, dst, torch.ones(E, device=x.device))
+            out = out * torch.log1p(deg).view(1, N, 1, 1)
 
         out = out.reshape(B, N, D)
         x = x + self.drop(self.to_out(out))
@@ -635,6 +656,7 @@ class SparseGraphTransformer(nn.Module):
     """Stack de capas de atencion sparse por adyacencia + labeling trick + readout."""
 
     def __init__(self, num_relation, num_layer, hidden_dim, num_heads, drop,
+                 attn='softmax',
                  use_rwse=False, rwse_dim=16, use_lappe=False, lappe_dim=16,
                  use_source_rw=False, source_rw_dim=8):
         super().__init__()
@@ -657,7 +679,8 @@ class SparseGraphTransformer(nn.Module):
         if use_source_rw:
             self.source_rw_proj = nn.Linear(source_rw_dim, hidden_dim)
         self.layers = nn.ModuleList([
-            SparseRelationalAttentionLayer(hidden_dim, num_heads, num_relation, drop)
+            SparseRelationalAttentionLayer(hidden_dim, num_heads, num_relation, drop,
+                                           attn=attn)
             for _ in range(num_layer)
         ])
         self.norm_out = nn.LayerNorm(hidden_dim)
@@ -744,7 +767,7 @@ class SparseExpanderGraphTransformer(nn.Module):
     num_relation+2 (self-loop en num_relation, expander en num_relation+1)."""
 
     def __init__(self, num_relation, num_layer, hidden_dim, num_heads, drop,
-                 exp_degree=4, exp_seed=0,
+                 exp_degree=4, exp_seed=0, attn='softmax',
                  use_rwse=False, rwse_dim=16, use_lappe=False, lappe_dim=16,
                  use_source_rw=False, source_rw_dim=8):
         super().__init__()
@@ -770,7 +793,8 @@ class SparseExpanderGraphTransformer(nn.Module):
         # Se pasa num_relation+1 a la capa => reserva una relacion extra (R_exp) ademas
         # del self-loop: R = (num_relation+1)+1 = num_relation+2 filas en rel_bias/rel_value.
         self.layers = nn.ModuleList([
-            SparseRelationalAttentionLayer(hidden_dim, num_heads, num_relation + 1, drop)
+            SparseRelationalAttentionLayer(hidden_dim, num_heads, num_relation + 1, drop,
+                                           attn=attn)
             for _ in range(num_layer)
         ])
         self.norm_out = nn.LayerNorm(hidden_dim)
