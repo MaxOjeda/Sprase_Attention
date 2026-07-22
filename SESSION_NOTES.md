@@ -90,6 +90,38 @@ in-distribution incluida. Se une a RWSE/LapPE como fuente de señal NO no-redund
 
 ---
 
+## 2026-07-22 — IMPLEMENTADO: atención sin normalizar (`--attn sigmoid`) — opción A, pendiente de correr
+
+**Contexto (hipótesis mecánica)**: diagnóstico de por qué el sparse pierde contra NBFNet pese a ser
+estructuralmente el más cercano: (1) el **segment-softmax normaliza a Σα=1** por nodo destino ⇒ la
+agregación es un promedio ponderado convexo que **borra el conteo de caminos de evidencia** (10 caminos
+de soporte puntúan igual que 1 con la misma composición media) y es ciega al grado; NBFNet agrega por
+SUMA y conserva ambos. (2) PNA entrega múltiples estadísticos, el softmax uno. (3) La agregación
+aprendida sobre-ajusta el train graph (firma valid↑/test↓ ya documentada). La opción A ataca (1), la
+causa candidata dominante: reemplazar el softmax por **gates sigmoides por arista SIN normalizar**
+⇒ suma ponderada aprendida que conserva conteo de caminos y sensibilidad al grado, manteniendo la
+selectividad por query (el gate puede apagar aristas irrelevantes, cosa que NBFNet no puede). Nota de
+techo: sparse+expander interpola entre sparse y full, ambos < NBFNet ⇒ más conectividad no saca del
+intervalo; cambiar la agregación sí cambia la familia de funciones.
+
+**Implementación (HECHA, sin correr aún)**: flag `--attn {softmax,sigmoid,degree}` en `train.py`,
+aplicable a `--model sparse` y `sparse_exp` (misma capa). `softmax` = comportamiento actual (default,
+sin cambio); `sigmoid` = opción A (α=σ(logit), sin scatter-amax ni denom ⇒ además algo más barato);
+`degree` = fallback intermedio softmax × log(1+grado_in) del destino (reinyecta el conteo como scaler
+estilo PNA) por si la suma cruda desestabiliza el entrenamiento. En `src/model.py::
+SparseRelationalAttentionLayer` (branch en forward), threading por `SparseGraphTransformer` y
+`SparseExpanderGraphTransformer`. Smoke test CPU sintético OK: forward/backward de los 3 modos en
+ambos modelos, gradiente fluye por `rel_bias`, y sigmoid ≠ softmax con los mismos pesos.
+
+**Experimento planificado (predicción falsable)**: FB15k-237 ind v1, best config sparse
+(`--model sparse --attn sigmoid --hidden_dim 64 --drop 0.0 --learning_rate 1e-3 --num_layer 6
+--batch_size 16 --max_epochs 20 --seed 42`), head-to-head vs sparse softmax (0.338) y NBFNet (0.459).
+Si el conteo de caminos es el gap dominante ⇒ salto grande (zona 0.42+); si queda ~0.34 ⇒ la causa
+(1) no era la dominante, pasar a regularización hacia agregación fija. Después réplica transductiva
+(sparse 0.403 vs NBFNet ~0.415, gap chico). **Resultado: PENDIENTE.**
+
+---
+
 ## 2026-07-20 — sparse_exp lanzado en FB15k-237 TRANSDUCTIVO + hallazgo de costo del expander
 
 **Contexto operacional**: se lanzó `--model sparse_exp` en FB15k-237 transductivo reusando la GPU del
