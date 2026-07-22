@@ -574,12 +574,17 @@ class SparseRelationalAttentionLayer(nn.Module):
         grado (como la agregacion sum de NBFNet) manteniendo la selectividad por query.
       - 'degree': segment-softmax reescalado por log(1+grado_in) del destino =>
         reinyecta el conteo como scaler (estilo PNA) sin abandonar el softmax.
+      - 'anchor': interpola alpha_final = lambda*alpha_softmax + (1-lambda)*uniforme,
+        con lambda aprendido por cabeza (sigmoide). uniforme = 1/grado_in reparte por
+        igual entre aristas entrantes (= agregacion media fija, la que transfiere).
+        lambda->0 recupera la media GNN; lambda->1 la atencion aprendida. Regulariza
+        hacia la agregacion fija para atacar la firma de overfit valid^/test_ (opcion C).
     """
 
     def __init__(self, hidden_dim, num_heads, num_relation, drop, attn='softmax'):
         super().__init__()
         assert hidden_dim % num_heads == 0
-        assert attn in ('softmax', 'sigmoid', 'degree')
+        assert attn in ('softmax', 'sigmoid', 'degree', 'anchor')
         self.attn = attn
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -598,6 +603,11 @@ class SparseRelationalAttentionLayer(nn.Module):
 
         self.rel_bias = nn.Parameter(torch.zeros(num_heads, R))
         self.rel_value = nn.Parameter(torch.ones(num_heads, R, self.head_dim))
+
+        # opcion C: lambda por cabeza para mezclar softmax con la media uniforme.
+        # init en 0 => sigmoid=0.5 (mezcla neutra); se aprende hacia media o atencion.
+        if attn == 'anchor':
+            self.anchor_logit = nn.Parameter(torch.zeros(num_heads))
 
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2), nn.GELU(),
@@ -633,6 +643,14 @@ class SparseRelationalAttentionLayer(nn.Module):
             denom = logit.new_zeros(B, N, H)
             denom.index_add_(1, dst, logit)
             alpha = logit / (denom.gather(1, idx) + 1e-9)           # (B, E, H)
+            if self.attn == 'anchor':
+                # media uniforme por nodo destino: 1/grado_in por arista entrante.
+                deg = torch.zeros(N, device=x.device)
+                deg.index_add_(0, dst, torch.ones(E, device=x.device))
+                unif = (1.0 / deg[dst].clamp(min=1.0)).view(1, E, 1)  # (1, E, 1)
+                lam = torch.sigmoid(self.anchor_logit).view(1, 1, H)  # (1, 1, H)
+                # ambos suman 1 por dst => la mezcla convexa tambien (conserva promedio).
+                alpha = lam * alpha + (1.0 - lam) * unif
         alpha = self.drop(alpha)
 
         # Mensaje relacional (composicion DistMult) ponderado por la atencion.

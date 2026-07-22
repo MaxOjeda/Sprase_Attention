@@ -182,11 +182,13 @@ def main():
     p.add_argument('--exp_degree', type=int, default=4,
                    help='Grado del grafo expander (aristas por nodo) para --model sparse_exp.')
     p.add_argument('--attn', type=str, default='softmax',
-                   choices=['softmax', 'sigmoid', 'degree'],
+                   choices=['softmax', 'sigmoid', 'degree', 'anchor'],
                    help='Agregacion de la atencion sparse (sparse/sparse_exp). softmax: '
                         'segment-softmax (promedio, pierde conteo de caminos); sigmoid: '
                         'gates sin normalizar => suma ponderada que conserva conteo de '
-                        'caminos y grado (opcion A); degree: softmax x log(1+grado_in).')
+                        'caminos y grado (opcion A); degree: softmax x log(1+grado_in); '
+                        'anchor: interpola softmax con la media uniforme via lambda aprendido '
+                        'por cabeza => regulariza hacia la agregacion fija (opcion C).')
     p.add_argument('--aggregate', type=str, default='pna', choices=['pna', 'sum'],
                    help='NBFNet y sparse_nbfv: funcion de agregacion del message passing.')
     p.add_argument('--use_rwse', action='store_true',

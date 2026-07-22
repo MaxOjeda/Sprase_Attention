@@ -90,7 +90,7 @@ in-distribution incluida. Se une a RWSE/LapPE como fuente de señal NO no-redund
 
 ---
 
-## 2026-07-22 — IMPLEMENTADO: atención sin normalizar (`--attn sigmoid`) — opción A, pendiente de correr
+## 2026-07-22 — Atención sin normalizar (`--attn sigmoid`/`degree`) — opción A: REFUTADA como causa dominante
 
 **Contexto (hipótesis mecánica)**: diagnóstico de por qué el sparse pierde contra NBFNet pese a ser
 estructuralmente el más cercano: (1) el **segment-softmax normaliza a Σα=1** por nodo destino ⇒ la
@@ -117,8 +117,90 @@ ambos modelos, gradiente fluye por `rel_bias`, y sigmoid ≠ softmax con los mis
 (`--model sparse --attn sigmoid --hidden_dim 64 --drop 0.0 --learning_rate 1e-3 --num_layer 6
 --batch_size 16 --max_epochs 20 --seed 42`), head-to-head vs sparse softmax (0.338) y NBFNet (0.459).
 Si el conteo de caminos es el gap dominante ⇒ salto grande (zona 0.42+); si queda ~0.34 ⇒ la causa
-(1) no era la dominante, pasar a regularización hacia agregación fija. Después réplica transductiva
-(sparse 0.403 vs NBFNet ~0.415, gap chico). **Resultado: PENDIENTE.**
+(1) no era la dominante, pasar a regularización hacia agregación fija.
+
+**Resultado (FB15k-237 ind v1, full-filtered, corrido 2026-07-22)** — sigmoid y degree lanzados como
+steps `srun --overlap` sobre la GPU del job transductivo 812436 (SIGSTOP'd, PID 2773478; asignación
+retenida). Logs `logs/sparse_sigmoid_v1.log`, `logs/sparse_degree_v1.log`; ckpts
+`experiments/sparse_{sigmoid,degree}_v1/`.
+
+| sparse variant       | valid_mrr | **test_mrr** | H@1 | H@3 | H@10 | MR |
+|----------------------|----------:|-------------:|----:|----:|-----:|---:|
+| softmax (base)       | 0.446     | 0.338        | —   | —   | 0.451 | — |
+| **sigmoid (A)**      | 0.415     | **0.356**    | 0.312 | 0.380 | 0.427 | 200 |
+| **degree (A')**      | **0.462** | **0.366**    | 0.300 | 0.410 | 0.473 | 190 |
+| *NBFNet (ref)*       | *0.492*   | *0.459*      | *0.371* | *0.520* | *0.605* | *117* |
+
+**Análisis (causa mecánica)**
+- **La opción A queda REFUTADA como hipótesis dominante.** Ni la suma cruda (sigmoid) ni el scaler de
+  grado (degree) sacan el test de la zona ~0.34-0.37: sigmoid +0.018 y degree +0.028 sobre softmax
+  (0.338), lejísimos del 0.42+ que habría confirmado que el conteo de caminos era el gap. **La causa (1)
+  —softmax borra el conteo— NO era la dominante.**
+- **Señal más nítida = firma de overfit (causa 3).** `degree` produce el **valid_mrr más alto de las tres
+  variantes de atención (0.462 > softmax 0.446)** pero el test se queda en 0.366 ⇒ **gap valid→test 0.096,
+  el peor de los tres.** Reinyectar el conteo como scaler de grado le da más con qué ajustar el train
+  graph, pero NO transfiere al grafo inductivo disjunto. Es exactamente el mal estructural del sparse ya
+  documentado (valid↑/test↓), ahora amplificado. El cuello de botella no es la normalización sino la
+  **transferencia/sobre-ajuste de la agregación aprendida**.
+- sigmoid además **baja el valid** (0.446→0.415): la suma sin normalizar desestabiliza el ajuste
+  in-distribution sin comprar test.
+
+**Decisión**
+- Opción A (sigmoid/degree) cerrada: no cierra el gap con NBFNet; confirma que el gap del sparse es de
+  **transferencia (causa 3)**, no de normalización (causa 1). Siguiente paso: **opción C — regularizar la
+  atención hacia la agregación fija** (interpolar α_final = λ·α_aprendida + (1−λ)·uniforme con λ aprendido
+  por capa), que ataca directamente la firma valid↑/test↓. Implementada y lanzada a continuación (ver
+  entrada de abajo). El flag `--attn {softmax,sigmoid,degree,anchor}` queda en el código (default softmax,
+  sin cambio de comportamiento previo).
+
+---
+
+## 2026-07-22 — Opción C: regularizar la atención hacia agregación fija (`--attn anchor`) — REFUTADA (y ancla mal elegida)
+
+**Contexto (hipótesis)**: cerrada la opción A (el gap del sparse no es de normalización sino de
+**transferencia/overfit, causa 3**), atacar directamente la firma valid↑/test↓ interpolando la atención
+aprendida con una agregación fija: `α_final = λ·α_softmax + (1−λ)·uniforme`, con **λ aprendido por cabeza**
+(sigmoide). Idea: λ→0 recupera la media fija (regulariza, transfiere mejor), λ→1 la atención aprendida; el
+modelo elige el punto. Implementada en `src/model.py::SparseRelationalAttentionLayer` (branch `anchor` en
+forward, `self.anchor_logit = nn.Parameter(zeros(num_heads))` por capa), flag `--attn anchor` en `train.py`.
+
+**Experimento**: FB15k-237 ind v1, best config sparse (`--model sparse --attn anchor --hidden_dim 64
+--drop 0.0 --learning_rate 1e-3 --num_layer 6 --batch_size 16 --max_epochs 20 --seed 42`). Log
+`logs/sparse_anchor_v1.log`, ckpts `experiments/sparse_anchor_v1/` (best epoch 14).
+
+**Resultado (FB15k-237 ind v1, full-filtered)**
+
+| sparse variant   | valid_mrr | **test_mrr** | H@1  | H@3  | H@10 | MR  |
+|------------------|----------:|-------------:|-----:|-----:|-----:|----:|
+| softmax (base)   | 0.446     | 0.338        | —    | —    | 0.451 | — |
+| sigmoid (A)      | 0.415     | 0.356        | 0.312 | 0.380 | 0.427 | 200 |
+| degree (A')      | **0.462** | 0.366        | 0.300 | 0.410 | 0.473 | 190 |
+| **anchor (C)**   | 0.442     | **0.278**    | 0.188 | 0.334 | 0.434 | 181 |
+| *NBFNet (ref)*   | *0.492*   | *0.459*      | *0.371* | *0.520* | *0.605* | *117* |
+
+**Análisis (causa mecánica)**
+- **Opción C REFUTADA: es el PEOR test_mrr de todas las variantes sparse (0.278 < softmax base 0.338),
+  y produce el MAYOR gap valid→test hasta ahora (0.442→0.278 = 0.164).** Exactamente lo contrario de lo
+  que la regularización buscaba: mezclar la media fija no redujo la firma valid↑/test↓, la **amplificó**.
+- **λ aprendido NO se fue a 0.** Leído del checkpoint (best epoch 14), los 48 λ=σ(anchor_logit) se
+  estabilizaron en **~0.53–0.69 (media ≈0.60)** en todas las cabezas y capas (capa 0 la más alta,
+  ~0.60–0.69; capas 1-5 ~0.53–0.64). El modelo **no prefirió la agregación fija**; mantuvo ~60% atención
+  aprendida y mezclar el ~40% de media fija **degradó el test** en vez de estabilizarlo.
+- **El ancla elegida es la equivocada (crítica de diseño).** El branch mezcla `α_softmax` con `1/grado_in`
+  (mean-pooling), y **ambos suman 1 por nodo destino** ⇒ la mezcla convexa **sigue siendo un promedio
+  normalizado**, en la MISMA familia que la causa (1) ya refutada (el softmax que borra el conteo de
+  caminos). El ancla `1/grado_in` es *mean-pool*, **NO** la agregación de NBFNet (que **suma** con
+  estadísticos PNA y es sensible al grado). O sea: C interpola entre dos agregaciones que **ambas**
+  destruyen el conteo de caminos, y la fija es encima un baseline peor. Nunca llegó a testear "regularizar
+  hacia NBFNet"; testeó "regularizar hacia mean-pool", que degrada.
+
+**Decisión**
+- Opción C cerrada como implementada: no cierra el gap y empeora la transferencia. **Dos conclusiones**:
+  (i) confirma de nuevo que el cuello de botella es de transferencia (causa 3), no de normalización;
+  (ii) anclar hacia un promedio convexo normalizado (mean-pool) es el ancla incorrecta — para atacar la
+  causa (1) haría falta una agregación que **sume y conserve conteo/grado** (estilo suma/PNA), no otro
+  promedio convexo. **No re-probar mean-pool como "agregación fija".** El flag `--attn anchor` queda en el
+  código. Artefactos: `run_anchor_v1.sh`, `experiments/sparse_anchor_v1/`, `logs/sparse_anchor_v1.log`.
 
 ---
 
