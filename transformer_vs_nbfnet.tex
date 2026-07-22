@@ -1,0 +1,371 @@
+\documentclass[11pt]{article}
+
+% ======================================================================
+%  Paquetes (todos estándar en Overleaf)
+% ======================================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-noquoting]{babel}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{tikz}
+\usetikzlibrary{calc}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,
+            urlcolor=blue!55!black]{hyperref}
+
+% ----- entornos de teorema -----
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposición}[section]
+\newtheorem{corollary}[proposition]{Corolario}
+\theoremstyle{definition}
+\newtheorem{remark}[proposition]{Observación}
+
+% ----- macros -----
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\spanop}{\operatorname{span}}
+\newcommand{\Msg}{\mathrm{MSG}}
+\newcommand{\Agg}{\mathrm{AGG}}
+\newcommand{\softmax}{\mathrm{softmax}}
+
+\title{\textbf{Sobre la redundancia expresiva de la atención\\
+sobre representaciones tipo NBFNet en \emph{link prediction}\\ de un solo grafo de conocimiento}}
+\author{}
+\date{Junio de 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+NBFNet es hoy el método de referencia para predicción de enlaces (\emph{link prediction})
+en un único grafo de conocimiento. Una familia reciente de modelos le superpone una capa de
+\emph{atención} (en el espíritu de los \emph{graph transformers}) con la expectativa de que aporte
+una capacidad de razonamiento que el \emph{message passing} no posee. Esta nota responde, de forma
+fundamentada, dos preguntas que delimitan el alcance de esa idea. \textbf{(P1)} ¿Un transformer cuyos
+\emph{valores} provienen de un \emph{stream} tipo NBFNet captura algo que ese stream no contenga ya?
+Mostramos que \textbf{no}: la atención es un promedio ponderado de sus valores y, por lo tanto, no
+puede producir información en ninguna dirección ausente de todos ellos; como las representaciones de
+NBFNet ya son la agregación óptima de la evidencia de caminos dentro de su horizonte, la atención solo
+puede re-ponderar lo conocido. \textbf{(P2)} ¿Un transformer \emph{por sí solo}, sin NBFNet, puede
+capturar lo que NBFNet captura? La respuesta es matizada: un transformer ciego a la estructura del
+grafo no puede; un \emph{graph} transformer que use la adyacencia sí puede en principio ---pero al
+hacerlo \emph{reimplementa} el message passing, y su flexibilidad adicional no se traduce en una
+mejora medible en este régimen. Concluimos por qué, en estos datos, ``NBFNet ya captura todo lo que la
+atención podría aportar''.
+\end{abstract}
+
+% ======================================================================
+\section{Planteamiento}
+% ======================================================================
+
+Sea $G=(\mathcal{V},\mathcal{E})$ un grafo de conocimiento, con nodos (entidades) $\mathcal{V}$ y
+aristas tipadas $(x,r,y)\in\mathcal{E}$, donde $r$ es un \emph{tipo de relación}. La tarea de
+\emph{link prediction} consiste en, dada una consulta $(u,q,?)$ ---cabeza $u$ y relación $q$---,
+puntuar cada candidato $v$ según la plausibilidad de la tripleta $(u,q,v)$.
+
+NBFNet \cite{nbfnet} resuelve esta tarea con \emph{message passing} condicionado a la fuente, y es el
+estado del arte en el régimen de \emph{un solo grafo} (transductivo, e inductivo sobre entidades).
+Una propuesta natural ---y la que motiva esta nota--- es añadir una capa de \emph{atención} sobre las
+representaciones de nodo que NBFNet produce, con la idea de que la atención permita comparar
+candidatos entre sí, capturar dependencias de largo alcance, o componer relaciones de forma explícita.
+Empíricamente, en \texttt{WN18RR} y \texttt{FB15k-237}, esa atención no mejora la métrica de forma
+apreciable. La pregunta que abordamos es \emph{por qué}, y si hay una razón estructural.
+
+Fijamos primero los dos objetos: NBFNet (Sección~\ref{sec:nbfnet}) y la atención
+(Sección~\ref{sec:attn}).
+
+% ----------------------------------------------------------------------
+\subsection{NBFNet como agregación sobre caminos}
+\label{sec:nbfnet}
+
+NBFNet calcula, para cada candidato $v$, una representación $h_{u\to v}\in\R^{d}$ condicionada en la
+fuente $u$ y la relación $q$, mediante una recursión de Bellman--Ford generalizado:
+\begin{equation}
+\label{eq:bf}
+h^{(0)}_{u\to v} = \mathbf{1}[\,v=u\,]\,\boldsymbol{q},
+\qquad
+h^{(t)}_{u\to v} = \Agg\!\Big(\big\{\,\Msg\big(h^{(t-1)}_{u\to x},\, w_{r}\big)
+\;:\; (x,r,v)\in\mathcal{E}\,\big\}\Big),
+\end{equation}
+con $\boldsymbol q$ el embedding de la consulta, $w_r$ los parámetros del tipo de relación $r$, y
+$\Agg$ una agregación permutación-invariante. La inicialización $h^{(0)}_{u\to v}=\mathbf{1}[v=u]\,\boldsymbol q$
+(el \emph{labeling trick}) ancla la propagación a la fuente.
+
+El resultado central de \cite{nbfnet} es que, tras $L$ iteraciones, \eqref{eq:bf} computa una
+\emph{suma generalizada sobre todos los caminos} de longitud $\le L$ entre $u$ y $v$:
+\begin{equation}
+\label{eq:pathsum}
+h^{(L)}_{u\to v}
+\;=\;
+\bigoplus_{P\,\in\,\mathcal{P}^{\le L}_{u\to v}}\;
+\bigotimes_{(x,r,y)\,\in\,P} w_{r},
+\end{equation}
+donde $\mathcal{P}^{\le L}_{u\to v}$ son los caminos $u\to v$ de a lo sumo $L$ aristas y
+$(\oplus,\otimes)$ forman un semianillo. Dicho en palabras: \emph{el vector $h^{(L)}_{u\to v}$ ya es la
+evidencia acumulada de todos los caminos relacionales de hasta $L$ pasos que conectan la cabeza con el
+candidato.} Escribiremos $V_v := h^{(L)}_{u\to v}$ y lo llamaremos el \emph{valor} del nodo $v$. El
+predictor final del baseline es \emph{puntual}: un lector $\rho(V_v)$ asigna un puntaje a cada $v$ por
+separado.
+
+Una propiedad que usaremos: como \eqref{eq:bf} es message passing de $L$ capas, el campo receptivo de
+$V_v$ es la bola de radio $L$ alrededor de $\{u,v\}$. Por lo tanto $V_v$ solo puede contener evidencia
+de caminos de longitud $\le L$; ningún camino más largo está representado en él
+(Figura~\ref{fig:horizon}).
+
+% ----------------------------------------------------------------------
+\subsection{La operación de atención}
+\label{sec:attn}
+
+Una capa de atención actualiza la representación de cada nodo $v$ mezclando los valores de los demás:
+\begin{equation}
+\label{eq:attn}
+o_v \;=\; \sum_{w} \alpha_{vw}\, u_w,
+\qquad
+\alpha_{vw} = \softmax_w\!\Big(\tfrac{1}{\sqrt{d}}\, q_v^{\!\top} k_w\Big),
+\qquad
+u_w = W_V\, V_w .
+\end{equation}
+Los \emph{queries} $q_v$ y \emph{keys} $k_w$ determinan los pesos, y $W_V$ proyecta los valores. Por
+construcción del \emph{softmax}, los pesos son no negativos y suman uno:
+\begin{equation}
+\label{eq:weights}
+\alpha_{vw}\ge 0 \quad\forall w,
+\qquad
+\sum_w \alpha_{vw} = 1 .
+\end{equation}
+La salida $o_v$ pasa luego por una conexión residual y una red \emph{feed-forward} puntual. La
+propiedad \eqref{eq:weights} ---que la atención es un \emph{promedio ponderado} de los valores--- es
+el núcleo del argumento de la Sección~\ref{sec:q1}.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.0,>=stealth,
+    nodo/.style={circle,draw,fill=blue!8,minimum size=15pt,inner sep=0pt,font=\small},
+    fuente/.style={circle,draw,thick,fill=blue!25,minimum size=17pt,inner sep=0pt,font=\small},
+    lejos/.style={circle,draw,dashed,fill=red!8,minimum size=15pt,inner sep=0pt,font=\small}]
+  % horizonte L=2 (círculo punteado)
+  \draw[gray!55,dashed] (0,0) circle (2.45cm);
+  \node[gray!70] at (1.75,1.95) {\footnotesize horizonte $L$};
+  % fuente
+  \node[fuente] (u) at (0,0) {$u$};
+  % nodos a 1 y 2 hops (dentro)
+  \node[nodo] (a) at (1.3,0.5) {};
+  \node[nodo] (b) at (0.6,-1.2) {};
+  \node[nodo] (c) at (-1.4,0.3) {};
+  \node[nodo] (d) at (2.2,-0.3) {$v_1$};
+  % candidato lejano (fuera del horizonte)
+  \node[lejos] (v) at (4.4,0.2) {$v_2$};
+  \node[nodo] (e) at (3.3,-0.6) {};
+  % aristas
+  \draw (u)--(a); \draw (u)--(b); \draw (u)--(c); \draw (a)--(d);
+  \draw (d)--(e); \draw (e)--(v); \draw (b)--(e);
+  % etiquetas
+  \node[blue!45!black,below] at (d.south) {\footnotesize dentro ($d(u,v_1)\le L$)};
+  \node[red!55!black,below] at (v.south) {\footnotesize fuera ($d(u,v_2)>L$)};
+\end{tikzpicture}
+\caption{Campo receptivo de un NBFNet de $L$ capas. El valor $V_{v_1}$ de un candidato \emph{dentro}
+del horizonte ($d(u,v_1)\le L$) contiene la evidencia de los caminos que lo conectan con la fuente; el
+de un candidato \emph{fuera} ($d(u,v_2)>L$) no, porque la propagación de $L$ pasos no alcanza el camino
+correspondiente.}
+\label{fig:horizon}
+\end{figure}
+
+% ======================================================================
+\section{P1: un transformer sobre valores de NBFNet es redundante}
+\label{sec:q1}
+% ======================================================================
+
+Esta es, en esencia, la arquitectura cuestionada: NBFNet produce los valores $V_v$ y una capa de
+atención los mezcla antes del lector. Mostramos que la atención no puede aportar información nueva, y
+luego que, donde podría aportarla, esa información tampoco está en los valores.
+
+% ----------------------------------------------------------------------
+\subsection{La atención no crea direcciones ausentes de sus valores}
+
+\begin{proposition}
+\label{prop:span}
+Sea $o_v=\sum_w \alpha_{vw}\, u_w$ la salida de la agregación de atención \eqref{eq:attn}, con pesos
+que cumplen \eqref{eq:weights}. Entonces $o_v\in\spanop\{u_w\}_w$. En particular, si una dirección
+$\varphi\in\R^{d}$ es ortogonal a todos los valores, es decir $\varphi^{\!\top}u_w=0$ para todo $w$,
+entonces $\varphi^{\!\top}o_v=0$ \emph{cualquiera que sea el patrón de atención} $\{\alpha_{vw}\}$.
+\end{proposition}
+
+\begin{proof}
+$o_v$ es una combinación lineal de los $u_w$, luego pertenece a su \emph{span}. La segunda afirmación
+sigue por linealidad del producto interno:
+$\varphi^{\!\top}o_v=\sum_w \alpha_{vw}\,\varphi^{\!\top}u_w=\sum_w \alpha_{vw}\cdot 0=0.$
+\end{proof}
+
+La Proposición~\ref{prop:span} formaliza una limitación simple pero decisiva: \textbf{la atención solo
+\emph{recombina} los valores que recibe.} Si una característica discriminativa ---por ejemplo, la
+evidencia de un camino particular--- no está presente en ningún valor $V_w$, ninguna distribución de
+pesos la hace aparecer en la salida. La proyección $W_V$, la conexión residual y la red
+\emph{feed-forward} posteriores actúan \emph{por nodo} (puntualmente) y no cambian esta conclusión: la
+única vía por la que la representación de $v$ adquiere información sobre otro nodo $w$ es la mezcla
+\eqref{eq:attn}, gobernada por la Proposición~\ref{prop:span}.
+
+% ----------------------------------------------------------------------
+\subsection{Consecuencia al combinarla con valores de NBFNet}
+
+Cada $V_w$ es, por \eqref{eq:pathsum}, el agregado de todos los caminos $u\to w$ de hasta $L$ hops.
+Conviene separar dos regímenes según la distancia $d(u,v)$ entre la cabeza y el candidato.
+
+\paragraph{Dentro del horizonte, $d(u,v)\le L$.}
+La evidencia de los caminos hacia $v$ está \emph{íntegra} en un \emph{único} valor, $V_v$, y el lector
+puntual $\rho(V_v)$ ya la ve. Mezclar $V_v$ con otros valores no agrega evidencia de caminos: solo
+re-pondera lo que ya estaba disponible. Esto explica por qué, en la práctica, quitar o alterar la
+capa de atención no cambia apreciablemente la métrica: dentro del horizonte, la atención es
+estrictamente redundante con la representación que NBFNet ya entrega.
+
+\paragraph{Fuera del horizonte, $d(u,v)>L$.}
+Ahora \emph{ningún} valor $V_w$ contiene el camino de longitud $>L$ que conecta la fuente con el gold,
+porque el message passing de $L$ capas no llegó a propagarlo (Figura~\ref{fig:horizon}). Sea
+$\varphi_{\text{largo}}$ la dirección que codificaría esa evidencia de largo alcance: por construcción
+$\varphi_{\text{largo}}^{\!\top}V_w=0$ para todo $w$, y la Proposición~\ref{prop:span} implica que la
+atención \emph{no puede recuperarla}. Es decir: justo donde la información faltante podría ayudar, no
+está en los valores, y por lo tanto la atención sobre esos valores tampoco la puede explotar.
+
+\begin{corollary}[La redundancia es una coincidencia de horizonte]
+\label{cor:horizon}
+Un transformer cuyos valores provienen de un NBFNet de horizonte $L$, y que opera \emph{dentro de ese
+mismo horizonte}, es redundante: su salida es un promedio de agregados de caminos de longitud $\le L$
+y, por la Proposición~\ref{prop:span}, no contiene evidencia de caminos ausente de todos los valores.
+La única forma de aportar algo no redundante es \emph{introducir información de fuera del horizonte}
+(caminos $>L$, o estructura por pares no codificada en los nodos). Pero esa información, por
+definición, no es ``el valor que viene del stream NBFNet'': es un ingrediente adicional.
+\end{corollary}
+
+El Corolario~\ref{cor:horizon} también predice la \emph{única} forma en que la información relacional
+de largo alcance puede ayudar: introduciéndola \emph{explícitamente} (por ejemplo, features de caminos
+de longitud mayor que el horizonte del message passing), no recombinando los valores. Esto coincide con
+lo que observamos: en las consultas cuyo candidato verdadero queda más lejos que el horizonte de
+propagación ---donde la representación de nodo pierde poder discriminativo--- un descriptor explícito de
+caminos largos aporta una señal complementaria, pequeña pero real.
+
+\begin{remark}[Una objeción y su respuesta]
+Podría argumentarse: ``si \emph{apilo} capas de atención \emph{sobre el grafo}, cada capa añade un hop
+y así extiendo el horizonte''. Es cierto, pero entonces ya no se está mezclando un $V$ fijo de NBFNet:
+se está haciendo \emph{más} message passing, ahora con pesos de atención. Eso corresponde a la
+Pregunta~2 (Sección~\ref{sec:q2}, caso (b)) y, empíricamente, equivale a un NBFNet más profundo: no
+recupera el régimen de largo alcance y tiende a degradarse por \emph{over-smoothing}
+\cite{oono} (al apilar capas, las representaciones de los nodos se vuelven mutuamente
+indistinguibles).
+\end{remark}
+
+% ======================================================================
+\section{P2: ¿un transformer por sí solo captura lo que NBFNet captura?}
+\label{sec:q2}
+% ======================================================================
+
+``Transformer por sí solo'' admite dos lecturas, y el matiz \emph{es} la respuesta.
+
+% ----------------------------------------------------------------------
+\subsection{Caso (a): transformer ciego a la estructura --- \emph{no}}
+
+Si la atención es \emph{all-pairs} sobre embeddings de nodo \emph{sin} usar la adyacencia (los nodos
+como un conjunto sin estructura), el modelo no tiene acceso a las aristas. Pero las aristas son lo que
+\emph{define} los caminos, y los caminos son el contenido del razonamiento (ecuación
+\eqref{eq:pathsum}). El modelo debería \emph{inferir} la adyacencia a partir de las features, lo cual
+es inviable para grafos arbitrarios y, de forma más fundamental, \textbf{rompe la inductividad}: con
+entidades nuevas en test (grafo disjunto), no hay embeddings de nodo aprendidos que transferir. Un
+transformer ciego a la estructura no puede, por tanto, capturar NBFNet.
+
+% ----------------------------------------------------------------------
+\subsection{Caso (b): \emph{graph} transformer --- \emph{sí en principio, pero}}
+
+Si la atención está \emph{restringida o sesgada por la adyacencia relacional} (cada nodo atiende a sus
+vecinos, con un sesgo dependiente del tipo de relación), con la fuente marcada y $L$ capas apiladas,
+entonces el modelo \textbf{puede igualar o exceder a NBFNet}. La razón es estructural:
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{El message passing es un caso particular de la atención sobre aristas.} Un GNN es una
+        capa de atención cuyo patrón está \emph{fijado} a la adyacencia; \emph{graph attention}
+        \cite{gat} lo generaliza a pesos aprendidos. Así, $\{\text{message passing}\}\subseteq
+        \{\text{atención restringida a aristas}\}$: una capa de \emph{graph attention} equivale a un
+        hop, y $L$ capas a $L$ hops, con agregación aprendida en lugar de fija.
+  \item \textbf{La composición relacional es expresable como atención.} El \emph{Edge Transformer}
+        \cite{edgetransformer} usa atención \emph{triangular} sobre pares de entidades ---actualiza el
+        par $(i,j)$ atendiendo a $k$ vía $(i,k)$ y $(k,j)$--- y compone relaciones $i\!\to\!k\!\to\!j$,
+        igualando o superando a los GNNs en generalización sistemática. Un transformer \emph{puede},
+        pues, realizar el razonamiento de caminos.
+\end{itemize}
+
+Hay, sin embargo, dos reparos decisivos.
+
+\paragraph{(i) Para igualar a NBFNet hay que darle la estructura $\Rightarrow$ reimplementa el message
+passing.} En cuanto el graph transformer usa las aristas, los tipos de relación y el nodo fuente, está
+\emph{haciendo} message passing por medio de la atención. No lo trasciende: es ``NBFNet con agregación
+aprendida en vez de fija''. La pregunta deja de ser ``¿puede?'' y pasa a ser ``¿la agregación
+\emph{blanda y aprendida} aporta algo sobre la \emph{fija}?''.
+
+\paragraph{(ii) Poder $\neq$ mejorar.} La versión expresiva (atención por pares / triangular) cuesta
+$O(N^2)$ o $O(N^3)$ en el número de entidades $N$, prohibitivo en grafos grandes, lo que obliga a
+atención \emph{sparse} o \emph{lineal}, que sacrifica justamente la expresividad extra. Y aun
+teniéndola, la flexibilidad adicional resulta empíricamente inerte en \texttt{WN18RR} y
+\texttt{FB15k-237}: la agregación fija de caminos de NBFNet ya es casi óptima para la masa de consultas
+alcanzable, y el único margen restante (las consultas de largo alcance) no lo cierra la atención sobre
+el mismo sustrato (Sección~\ref{sec:q1}).
+
+% ======================================================================
+\section{Síntesis y conclusión}
+% ======================================================================
+
+Los tres argumentos clásicos a favor de la atención sobre un GNN son: \textbf{(i)} alcance global en
+una sola capa; \textbf{(ii)} agregación blanda dependiente del input, en vez de fija; \textbf{(iii)}
+razonamiento por pares o de orden superior. En \emph{link prediction} de un solo grafo, los tres se
+diluyen:
+\begin{itemize}[leftmargin=1.4em]
+  \item (ii) es \textbf{inerte}: promediar valores que ya son agregados de caminos no añade nada dentro
+        del horizonte (Proposición~\ref{prop:span}); quitar la atención no cambia la métrica.
+  \item (iii) es \textbf{redundante}: re-codificar pares o composición de relaciones reproduce ---peor
+        codificada--- la información que el valor de nodo ya contiene.
+  \item (i) es el \textbf{único margen real}, en las consultas de largo alcance, pero exige introducir
+        información de fuera del horizonte de propagación (Corolario~\ref{cor:horizon}), no recombinar
+        los valores; y en estos datos el efecto es pequeño.
+\end{itemize}
+
+\noindent
+La conclusión no es que la atención sea débil, sino más sutil:
+
+\begin{center}
+\fbox{\parbox{0.94\linewidth}{\centering
+NBFNet captura lo que la atención podría aportar porque su agregación fija de caminos ya es (casi)
+óptima para la masa alcanzable: \emph{promediarla} no agrega información (P1), y \emph{reproducirla} con
+atención es reimplementar el message passing (P2). La atención solo aportaría introduciendo evidencia
+que el message passing estructuralmente no posee ---caminos más largos que su horizonte, o relaciones
+por pares---, y ese margen, en estos benchmarks, es marginal.}}
+\end{center}
+
+\noindent
+En términos de diseño: una capa de atención \emph{sobre} las representaciones de NBFNet es redundante
+por construcción; un graph transformer \emph{en lugar} de NBFNet reimplementa el message passing sin
+una ganancia medible; y la única dirección potencialmente fértil ---inyectar evidencia de caminos de
+largo alcance, más allá del horizonte de propagación--- es, en \texttt{WN18RR}/\texttt{FB15k-237}, de
+efecto pequeño. Esto acota con un argumento, y no solo con experimentos, qué puede esperarse de la
+atención en este problema.
+
+% ======================================================================
+\begin{thebibliography}{9}
+% ======================================================================
+\bibitem{nbfnet}
+Z.~Zhu, Z.~Zhang, L.-P.~Xhonneux, J.~Tang.
+\emph{Neural Bellman-Ford Networks: A General Graph Neural Network Framework for Link Prediction}.
+NeurIPS 2021. arXiv:2106.06935.
+
+\bibitem{edgetransformer}
+L.~Bergen, T.~O'Donnell, D.~Bahdanau.
+\emph{Systematic Generalization with Edge Transformers}.
+NeurIPS 2021. arXiv:2112.00578.
+
+\bibitem{gat}
+P.~Veli\v{c}kovi\'c, G.~Cucurull, A.~Casanova, A.~Romero, P.~Li\`o, Y.~Bengio.
+\emph{Graph Attention Networks}. ICLR 2018. arXiv:1710.10903.
+
+\bibitem{oono}
+K.~Oono, T.~Suzuki.
+\emph{Graph Neural Networks Exponentially Lose Expressive Power for Node Classification}.
+ICLR 2020. arXiv:1905.10947.
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,200 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage{cvpr}
+\usepackage{times}
+\usepackage{epsfig}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\def\cvprPaperID{****}
+\def\confName{CVPR}
+\def\confYear{2025}
+
+\begin{document}
+
+\title{Breaking the Low-Rank Dilemma of Linear Attention}
+
+\author{Qihang Fan$^{1,2}$, Huaibo Huang$^{1*}$, Ran He$^{1,2}$ \\
+$^1$MAIS \& CRIPAC, Institute of Automation, Chinese Academy of Sciences, Beijing, China \\
+$^2$School of Artificial Intelligence, University of Chinese Academy of Sciences, Beijing, China \\
+{\tt\small fanqihang.159@gmail.com, huaibo.huang@cripac.ia.ac.cn, rhe@nlpr.ia.ac.cn}
+}
+
+\maketitle
+
+\begin{abstract}
+The Softmax attention mechanism in Transformer models is notoriously computationally expensive due to its quadratic complexity, posing significant challenges in vision applications. In contrast, linear attention offers a far more efficient solution by reducing the complexity to linear levels. However, linear attention often suffers significant performance degradation compared to Softmax attention. Our experiments indicate that this performance drop stems from the low-rank nature of linear attention's output feature map, which hinders its ability to adequately model complex spatial information. To address this low-rank dilemma, we conduct rank analysis from two perspectives: the KV buffer and the output features. Consequently, we introduce \textbf{Rank-Augmented Linear Attention (RALA)}, which rivals the performance of Softmax attention while maintaining linear complexity and high efficiency. Building upon RALA, we construct the \textbf{Rank-Augmented Vision Linear Transformer (RAVLT)}. Extensive experiments demonstrate that RAVLT achieves excellent performance across various vision tasks. Specifically, without using any additional labels, data, or supervision during training, RAVLT achieves an \textbf{84.4\%} Top-1 accuracy on ImageNet-1k with only \textbf{26M} parameters and \textbf{4.6G} FLOPs. This result significantly surpasses previous linear attention mechanisms, fully illustrating the potential of RALA. Code will be available at \url{https://github.com/qhfan/RALA}.
+\end{abstract}
+
+\section{Introduction}
+
+In recent years, the Transformer \cite{vaswani2017attention} has garnered increasing attention as a powerful foundational architecture. In the field of computer vision, Vision Transformers \cite{dosovitskiy2020image} have made significant breakthroughs in image classification, object detection, instance segmentation, and semantic segmentation, further demonstrating the vast potential of Transformers.
+
+However, applying Transformers to vision tasks is not straightforward. Self-attention, as the core mechanism of Transformers, has quadratic complexity. As the number of tokens increases, the computational load of self-attention grows significantly, making Transformers challenging to apply to vision tasks. Many works attempt to address this issue, with some approaches grouping vision tokens to limit the number of tokens each token can interact with \cite{liu2021swin,dong2022cswin,tu2022maxvit,yang2021focal,wang2022crossformer,tang2022quadtree}. While this method effectively reduces the model's complexity, it sacrifices the Transformer's crucial ability to perceive information globally. Another line of work attempts to downsample the keys and values in Softmax attention to capture global features with lower complexity \cite{chen2022regionvit,wang2021pyramid,wang2022pvtv2,ding2022davit}. However, this approach sacrifices the model's fine-grained perception capabilities.
+
+Unlike the methods mentioned above, linear attention \cite{katharopoulos2020transformers,cai2023efficientvit,han2023flatten,lu2024softmax,shen2021efficient,xiong2021nystromformer} takes a different approach by replacing the Softmax with kernel functions and altering the computation order of $Q$, $K$, and $V$, which is shown in Fig.~\ref{fig:comparison}. This reduces the quadratic complexity of Softmax attention to linear complexity. Additionally, because its computation closely resembles Softmax attention and only uses kernel functions to approximate Softmax, linear attention possesses excellent global modeling capability. Furthermore, since linear attention does not involve downsampling, it retains the model's fine-grained perception ability.
+
+Despite having a form and advantages very similar to Softmax attention, the actual performance of linear attention is less than satisfactory. Although it is highly efficient, its performance shows a significant gap compared to Softmax attention. To identify the cause of this performance gap, we conduct a comparison based on the DeiT-T architecture, merely replacing different attention mechanisms (vanilla linear attention, Enhanced Linear Attention \cite{cai2023efficientvit}, Efficient Attention \cite{shen2021efficient}, Focused Linear Attention \cite{han2023flatten}), with results shown in Fig.~\ref{fig:featuremaps}. We perform rank analysis on the features of single heads from different output feature maps ($N = 196$, $d = 64$, with the full rank of the matrix being 64). We find that the rank of output features from existing linear attentions are significantly lower than those from Softmax attention, indicating that the diversity of features they learn is comparatively poorer.
+
+Based on the above considerations, we aim to increase the rank of linear attention to achieve a trade-off between performance and efficiency in vision models. Specifically, we find that two computational steps in linear attention---the calculation of the KV buffer and the calculation of the output features---both affect its low-rank characteristics. Based on this, we propose Rank-Augmented Linear Attention (RALA). In RALA, to address the low-rank issue of the KV buffer, we use a set of context-aware rearrangement coefficients to restructure the weights of each token in the KV buffer. This approach enhances the richness and diversity of information in the KV buffer, which in turn increases the rank of the matrix. For the low-rank issue of the output features, we introduce a feature interaction strategy in the channel dimension, ensuring the output features reach a full-rank state. RALA effectively enhances the rank of the feature matrices in linear attention, enabling it to model complex spatial features with linear complexity. As shown in Fig.~\ref{fig:featuremaps}, the output feature matrix of RALA reaches the full rank of 64.
+
+Utilizing RALA, we construct the Rank-Augmented Vision Linear Transformer (RAVLT). We conduct extensive experiments with RAVLT on image classification, object detection, instance segmentation, and semantic segmentation, and RAVLT achieves results comparable to state-of-the-art Vision Transformers. RAVLT also exhibits great trade-off between performance and efficiency. As shown in Fig.~\ref{fig:comparison_models}, without using any additional training data, labels, or supervision, our model achieves an accuracy of \textbf{84.4\%} on ImageNet with only \textbf{26M} parameters and \textbf{4.6G} FLOPs. As far as we know, this surpasses all existing vision models.
+
+\section{Related Works}
+
+\textbf{Vision Transformer.} Transformer is first employed in the field of NLP \cite{vaswani2017attention} and have attracted wide interest in computer vision community \cite{dosovitskiy2020image,gao2022doubly,wu2021cvt,zhang2021multi}. The core operation of Transformer is the vanilla Softmax attention, which faces the challenge of quadratic complexity. Many methods have been proposed to address this challenge \cite{ding2022davit,fan2023lightweight,guo2022visual,hassani2023neighborhood,hatamizadeh2023global,chen2022regionvit,ren2022shunted,xia2022vision}. Some methods group tokens to limit the receptive field of each token, thereby reducing the complexity of vanilla Softmax attention to linear \cite{liu2021swin,dong2022cswin,fan2024semantic,yang2021focal,wang2022crossformer,tang2022quadtree,huang2022orthogonal,lin2023scale}. Another approach downsamples the key and value, sacrificing some fine-grained perception while preserving the Transformer's ability to perceive global information, and reduces the complexity of vanilla Softmax attention to linear \cite{chen2022regionvit,ding2022davit,fan2023lightweight,wang2021pyramid,wang2022pvtv2,ren2022shunted}. Many methods also try to combine classical CNNs with Transformers, leveraging the excellent local perception capabilities of CNNs with the global perception abilities of Transformers to create a powerful vision backbone \cite{dai2021coatnet,fan2023rethinking,fan2022lightweight,guo2022visual,hou2022conv2former,li2022contextual,liu2022convnet,rao2022hornet,si2022inception}. All these models rely on the vanilla Softmax attention, which incurs quadratic complexity.
+
+\textbf{Linear Attention.} Linear attention uses kernel functions to approximate the Softmax function, allowing it to change the computation order of $Q$, $K$, and $V$ in vanilla Softmax attention, thereby reducing the computational complexity from quadratic to linear. Although the efficiency of linear attention is significantly improved compared to vanilla Softmax attention, its performance still lags considerably behind. Many methods have been proposed to improve this \cite{han2023flatten,han2024demystify,lu2024softmax,shen2021efficient,you2023castling,zhu2023biformer}. Specifically, FLatten-Transformer \cite{han2023flatten} proposes focused function to improve the focus ability of linear attention. MLLA \cite{han2024demystify} connects the linear attention with Mamba \cite{gu2023mamba}. Most of other methods start by using kernel functions to approximate Softmax or introduce DWConv to increase feature diversity. However, the low-rank issue still exists, as shown in Fig.~\ref{fig:featuremaps}.
+
+\section{Method}
+
+\subsection{Preliminary}
+
+\textbf{Softmax Attention.} Softmax attention is the classic mechanism used in Transformers \cite{vaswani2017attention} and employed in ViT and its various variants \cite{dong2022cswin,dosovitskiy2020image,guo2022visual,liu2021swin,wang2022crossformer}. Specifically, given the input tokens $X \in \mathbb{R}^{N \times d}$, Softmax attention can generally be represented as:
+\begin{equation}
+Y_i = \sum_{j=1}^{N} \frac{\mathrm{Sim}(Q(X_i), K(X_j))}{\sum_{m=1}^{N} \mathrm{Sim}(Q(X_i), K(X_m))} V(X_j)
+\label{eq:softmax}
+\end{equation}
+where $i, j$ are the index of tokens, $X_i, Y_i \in \mathbb{R}^{1 \times d}$. $Q(.)$, $K(.)$ and $V(.)$ are the linear transformations for $X$. For simplicity, we use $Q_i$ to refer to $Q(X_i)$, and similarly for $K(.)$ and $V(.)$. In Softmax attention, it is generally expressed as: $\mathrm{Sim}(Q_i, K_j) = \exp(Q_i K_j^T / \sqrt{d})$. Since the computation of Softmax attention must be performed between all queries and keys, its complexity is $O(N^2 d)$, exhibiting quadratic growth as the number of tokens increases. Therefore, applying it directly in vision models results in significant computational overhead, especially when the number of tokens is large.
+
+\textbf{Linear Attention.} Compared to Softmax attention, linear attention uses kernel functions to approximate the $\mathrm{Sim}(., .)$, allowing the computation of $\mathrm{Sim}(Q_i, K_j)$ to be decomposed into $\mathrm{Sim}(Q_i, K_j) = \kappa(Q_i)\kappa(K_j)^T$. Specifically, the computation of linear attention is shown as follows:
+\begin{equation}
+\begin{aligned}
+Y_i &= \sum_{j=1}^{N} \frac{\mathrm{Sim}(Q_i, K_j)}{\sum_{m=1}^{N} \mathrm{Sim}(Q_i, K_m)} V_j \\
+&= \sum_{j=1}^{N} \frac{\kappa(Q_i)\kappa(K_j)^T}{\sum_{m=1}^{N} \kappa(Q_i)\kappa(K_m)^T} V_j \\
+&= \frac{\kappa(Q_i)\left(\sum_{j=1}^{N} \kappa(K_j)^T V_j\right)}{\kappa(Q_i)\left(\sum_{m=1}^{N} \kappa(K_m)^T\right)}
+\end{aligned}
+\label{eq:linear}
+\end{equation}
+where $\kappa(.)$ is the kernel function. Compared to the computation order $(QK^T)V$ in Softmax attention, the computation order $Q(K^T V)$ in linear attention reduces the complexity with respect to the number of tokens ($N$) from quadratic $O(N^2 d)$ to linear $O(N d^2)$. However, the reduction in complexity also results in a decline in performance. As shown in Fig.~\ref{fig:featuremaps}, the output features of linear attention have a low rank, indicating that linear attention fails to learn diverse visual features.
+
+\subsection{Rank-Augmented Linear Attention}
+
+In the general expression of linear attention, since the denominator $\kappa(Q_i)\left(\sum_{j=1}^{N} \kappa(K_j)^T\right) \in \mathbb{R}^{1 \times 1}$, the rank of the output feature matrix $Y$ only depends on the numerator. Therefore, in the subsequent analysis, we focus solely on the numerator $\kappa(Q_i)\left(\sum_{j=1}^{N} \kappa(K_j)^T V_j\right)$.
+
+\textbf{Augment the rank of the KV buffer.} Each $Q_i$ needs to be multiplied by the KV buffer $\left(\sum_{j=1}^{N} \kappa(K_j)^T V_j\right)$ to obtain the final $Y_i$. Therefore, the diversity of the features in the KV buffer, reflected by its rank, dictates the diversity of the final output features. Thus, we first analyze the rank of the KV buffer. As shown in Fig.~\ref{fig:kvbuffer}, the rank of the KV buffer is relatively low in almost all linear attentions. This means that the KV buffer does not store sufficient information for each $Q_i$ to query. The feature diversity in the KV buffer is poor.
+
+To increase the rank of the KV buffer, we introduce operations into its calculation to eliminate linear dependencies between different rows and columns. Beyond the feature diversity, the rank of the KV buffer is also closely related to the amount of information it contains, increasing the information content in the KV buffer will simultaneously raise its rank. Based on this consideration, rather than assigning a weight of 1 to each $\kappa(K_j)^T V_j$, $j \in [1, N]$ as in other linear attentions \cite{han2023flatten,shen2021efficient}, we aim to highlight the significance of each token in the KV buffer by assigning higher weights to the tokens that contain more information. That is:
+\begin{equation}
+B = \sum_{j=1}^{N} \alpha_j \kappa(K_j)^T V_j, \quad \sum_{j=1}^{N} \alpha_j = N
+\label{eq:kvbuffer}
+\end{equation}
+where $B$ denotes the KV buffer, $\alpha_j$ is the weight coefficient of the $j$-th token.
+
+To determine the value of $\alpha_j$, we draw inspiration from the design of Softmax attention. In Softmax attention, the attention scores between tokens are generally considered to represent the degree of correlation between them. Tokens more correlated with the global token are considered to contain more important information \cite{liang2022not}. Based on this fact, by calculating the attention score of the global query to each key, we determine the proportion of each token in the KV buffer, resulting in the following:
+\begin{equation}
+\begin{aligned}
+Q_g &= \frac{\sum_{i=1}^{N} Q_i}{N} \\
+\alpha_j &= N \times \frac{\exp(Q_g \kappa(K_j)^T)}{\sum_{m=1}^{N} \exp(Q_g \kappa(K_m)^T)}
+\end{aligned}
+\label{eq:alpha}
+\end{equation}
+
+As shown in Fig.~\ref{fig:kvbuffer}, after introducing $\alpha_j$ as the modulation coefficient for $\kappa(K_j)^T V_j$, the information content in the KV buffer increases, which significantly enhances its rank. More analysis about why the introduction of $\alpha_j$ can increase the matrix's rank can be found in Appendix.
+
+It should be emphasized that the summation of matrices can indeed increase their rank. This is fundamentally different from a simple linear combination, which cannot increase the rank. For example:
+\[
+1 \times \begin{bmatrix} 1 & 1 & 1 \\ 2 & 2 & 2 \\ 3 & 3 & 3 \end{bmatrix} + 1 \times \begin{bmatrix} 1 & 2 & 3 \\ 1 & 2 & 3 \\ 1 & 2 & 3 \end{bmatrix} = \begin{bmatrix} 2 & 3 & 4 \\ 3 & 4 & 5 \\ 4 & 5 & 6 \end{bmatrix}
+\]
+A linear combination of two rank-1 matrices can result in a matrix with rank 3.
+
+\textbf{Augment the rank of the output features.} In the fundamentals of matrix theory, for matrices $C$ and $D$, we have: $\mathrm{Rank}(CD) \leq \min(\mathrm{Rank}(C), \mathrm{Rank}(D))$. Therefore, when calculating the output features $Y = \kappa(Q)B$, its rank:
+\begin{equation}
+\begin{aligned}
+&\mathrm{Rank}(Y) \leq \min(\mathrm{Rank}(\kappa(Q)),\ \mathrm{Rank}(B)) \leq d \\
+Y \in &\mathbb{R}^{N \times d},\ \kappa(Q) \in \mathbb{R}^{N \times d},\ B = \sum_{j=1}^{N} \alpha_j \kappa(K_j)^T V_j \in \mathbb{R}^{d \times d}
+\end{aligned}
+\label{eq:rankbound}
+\end{equation}
+
+This indicates that even though the KV buffer $B$ reaches a full-rank state, the output feature matrix is still highly likely to be in a low-rank state ($\mathrm{Rank}(Y) < d$), meaning information loss occurs when computing each $Y_i$. As shown in Fig.~\ref{fig:outputfeatures}, we confirm this point when performing rank analysis on the output features. The output features exhibit a certain degree of rank reduction. To restore the output feature matrix $Y$ to a full-rank state, we aim to complete the information loss for each $Y_i$.
+
+Specifically, we post-process each output feature $Y_i$ by modulating $Y_i$ with a transformed form that contains the information of the original token $X_i$. At this stage, $Y_i$ has already completed token mixing, so this modulation is applied only along the channel dimension. Consequently, each output feature becomes:
+\begin{equation}
+Y_i = \phi(X_i) \odot \left(\kappa(Q_i) \sum_{j=1}^{N} \alpha_j \kappa(K_j)^T V_j\right)
+\label{eq:rala}
+\end{equation}
+where $\odot$ denotes the Hadamard product. As shown in Fig.~\ref{fig:outputfeatures}, after introducing the modulation coefficients, the feature diversity of the output feature matrix is significantly enhanced, transforming it from a low-rank state to a full-rank state. This indicates that token-specific modulation adds a degree of feature diversity to the output features. More analysis can be found in the Appendix.
+
+\textbf{Design of the block.} Fig.~\ref{fig:block} illustrates the design of the entire block. Our block design follows the classic Transformer block design \cite{vaswani2017attention}, consisting of linear attention and FFN. All the networks in this paper are constructed by stacking this basic block. We use a simple linear projection to serve as the transformation function $\phi(.)$. As for $\kappa(.)$, we have $\kappa(.) = \mathrm{Elu}(.) + 1$. For each block, we use CPE \cite{chu2023conditional} to serve as the positional encoding. The CPE is a simple $3 \times 3$ depth-wise convolution with residual connection.
+
+\subsection{Implementation Details}
+
+Based on the block in Fig.~\ref{fig:block}, we construct the Rank-Augmented Vision Linear Transformer (RAVLT), a hierarchical general vision backbone. As shown in Tab.~\ref{tab:architecture}, following the previous works \cite{fan2023rmt,dosovitskiy2020image,zhu2023biformer}, we build three RAVLT backbones with different settings of block number and channel number in each stage. In each stage, the image downsampling rates are $\frac{1}{4}$, $\frac{1}{8}$, $\frac{1}{16}$, and $\frac{1}{32}$, respectively. At the beginning of each stage, we use a $3 \times 3$ convolution with the stride of 2 to downsample the image.
+
+\begin{table}[h]
+\centering
+\caption{Architecture variants of RAVLT. The FLOPs are measured at resolution $224 \times 224$.}
+\label{tab:architecture}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Model & Blocks & Channels & Heads & Params (M) / FLOPs (G) \\
+\midrule
+RAVLT-T & [2,2,6,2]   & [64,128,256,512]   & [1,2,4,8]   & 15 / 2.4 \\
+RAVLT-S & [3,5,9,3]   & [64,128,320,512]   & [1,2,5,8]   & 26 / 4.6 \\
+RAVLT-B & [4,6,12,6]  & [96,192,384,512]   & [1,2,6,8]   & 48 / 9.9 \\
+RAVLT-L & [4,7,19,8]  & [96,192,448,640]   & [1,2,7,10]  & 95 / 16.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Experiments}
+
+We conduct extensive experiments on multiple vision tasks, such as image classification, object detection, instance segmentation, and semantic segmentation. We also make ablation studies to validate the importance of each component in RALA. More details can be found in Appendix.
+
+\subsection{Image Classification}
+
+\textbf{Settings.} We train our models on ImageNet-1K \cite{deng2009imagenet} from scratch and follow the same training strategy in DeiT \cite{touvron2021training} with the only supervision being classification loss. The maximum rates of increasing stochastic depth \cite{huang2016deep} are set to 0.1/0.15/0.4/0.55 for RAVLT-T/S/B/L, respectively. We evaluate the models on ImageNet \cite{deng2009imagenet} and ImageNet-V2 \cite{recht2019imagenet}.
+
+\textbf{Results.} In Tab.~\ref{tab:imagenet} and Tab.~\ref{tab:imagenetv2}, we compare the performance of various models on ImageNet and ImageNet-v2, respectively. Under models of comparable size, RAVLT achieves the best results. Specifically, RAVLT-B surpasses RMT-B by 0.5\% with the same FLOPs. This result demonstrates the superiority of RAVLT.
+
+\subsection{Inference Speed}
+
+We evaluate the RAVLT's inference efficiency on A100, the results are shown in Fig.~\ref{fig:speed}. It can be seen that our models exhibit better trade-off between performance and efficiency than other models.
+
+\subsection{Object Detection and Instance Segmentation}
+
+\textbf{Settings.} We adopt MMDetection \cite{chen2019mmdetection} to implement RetinaNet \cite{lin2017focal}, Mask-RCNN \cite{he2017mask} and Cascade Mask RCNN \cite{cai2018cascade}. Following previous works \cite{fan2023rmt,liu2021swin,wang2022pvtv2}, we use the commonly used ``1$\times$'' (12 training epochs) setting for the RetinaNet and Mask R-CNN. Besides, we use ``3$\times$+MS'' for Mask R-CNN and Cascade Mask R-CNN.
+
+\textbf{Results.} We show the comparison results in Tab.~\ref{tab:maskrcnn}, Tab.~\ref{tab:cascademaskrcnn}, and Tab.~\ref{tab:retinanet}. Compared to its competitors, RAVLT achieves excellent results across every detection framework. Specifically, with the framework of Cascade Mask R-CNN and ``3$\times$+MS'' schedule, RAVLT-B achieves 55.3 $AP^b$ and 47.7 $AP^m$. The result even surpasses CSwin-B, which is much larger than RAVLT-B.
+
+\subsection{Semantic Segmentation}
+
+\textbf{Settings.} We adopt the Semantic FPN \cite{kirillov2019panoptic} and UperNet \cite{xiao2018unified} based on MMSegmentation \cite{mmseg2020}, apply RAVLTs which are pretrained on ImageNet-1K as backbone. We use the same setting of PVT \cite{wang2021pyramid} to train the Semantic FPN, and follow the default settings in Swin \cite{liu2021swin} to train the UperNet.
+
+\textbf{Results.} We show the segmentation results in Tab.~\ref{tab:segmentation}. RAVLT surpasses its competitors across various frameworks. For example, with the framework of Semantic FPN, RAVLT-B achieves 51.9 mIoU. The result even surpasses larger RMT-L. With the framework of UperNet, RAVLT can achieve the mIoU of 53.2.
+
+\subsection{Comparison with Other Linear Attention}
+
+For a fair comparison with other linear attention mechanisms, similar to FLatten-Transformer \cite{han2023flatten}, we use the DeiT-T \cite{touvron2021training}, Swin-T, and Swin-S \cite{liu2021swin} network architectures, replacing their attention mechanisms with linear attention mechanisms. As shown in Tab.~\ref{tab:linearcomparison}, our RALA significantly outperforms other linear attention mechanisms and also exceeds the performance of Softmax attention.
+
+\subsection{Ablation Study}
+
+\textbf{Augmentation of the KV buffer.} We first ablate the effect of augmenting the KV buffer on the model. As shown in Tab.~\ref{tab:ablation}, augmenting the KV buffer significantly increases its rank and enhances feature diversity, thereby leading to substantial improvements in model performance. This enhancement is particularly evident in downstream tasks such as object detection.
+
+\textbf{Augmentation of the output features.} Since we use a linear projection to serve as $\phi(.)$, ablating the augmentation of the output feature reduces the model's parameter count. To ensure a fair comparison, we increase the expansion ratio of the FFN to maintain the model's parameter count and FLOPs at the same level. As shown in Tab.~\ref{tab:ablation}, the introduction of augmentation effectively increases the rank of the output features, thereby enhancing model's performance.
+
+\textbf{Conditional Position Encoding.} We use CPE \cite{chu2023conditional} to provide the positional information to our model. As shown in Tab.~\ref{tab:ablation}, CPE also improves the model's performance to some extent across various tasks. This indicates that CPE provides effective positional information for RAVLT.
+
+\textbf{Selection of $\phi(.)$ and $\kappa(.)$.} We compare the choices of functions $\phi(.)$ (linear projection, identity map, and tanh) and $\kappa(.)$ ($\mathrm{Elu}(.) + 1$ and $\mathrm{ReLU}(.)$), and experiments show that the model's performance improves with the inclusion of $\phi(.)$, regardless of the specific choice of it. This conclusion also holds for $\kappa(.)$, as shown in Tab.~\ref{tab:ablation}. This indicates that \textbf{the performance improvements stem from our RALA's augmentation of matrix's rank, rather than the selection of specific functions}.
+
+\textbf{Rank analysis of different layers.} Under the DeiT-T setting, we analyze the rank of different layers of our model (12 layers in total, with each layer's feature matrix having a shape of $N = 196$, $d = 64$, and a full rank of 64). As shown in Fig.~\ref{fig:rankanalysis}, RALA effectively increases the rank of the model's output features, thereby enhancing its performance.
+
+\section{Conclusion}
+
+In this paper, we investigate the causes of performance degradation in linear attention and conclude that the low rank of its output features is the primary factor. To address this issue, we propose Rank-Augmented Linear Attention (RALA). This method enhances two critical computation steps in linear attention---the calculation of the KV buffer and the computation of the output features---by employing two transformations. These augmentations effectively increase the rank of the matrices, thereby mitigating the low-rank problem in linear attention. Building upon RALA, we develop the Rank-Augmented Vision Linear Transformer (RAVLT), a novel architecture based on linear attention. RAVLT outperforms many existing Transformers, demonstrating significant potential for practical applications.
+
+\section*{Acknowledgements}
+
+This work is partially funded by Beijing Natural Science Foundation (4252054), Youth Innovation Promotion Association CAS (Grant No.2022132), Beijing Nova Program (20230484276), and CCF-Kuaishou Large Model Explorer Fund (NO. CCF-KuaiShou 2024005).
+
+\bibliographystyle{ieee_fullname}
+\bibliography{references}
+
+\end{document}
