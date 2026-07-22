@@ -78,6 +78,8 @@ data/
 experiments/
 .claude/
 .credentials.json
+logs/
+
 # PyBuilder
 .pybuilder/
 target/
@@ -226,3 +228,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 Exphormer/
+logs/*.log
+logs/*.log
