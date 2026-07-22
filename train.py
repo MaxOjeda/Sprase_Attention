@@ -66,7 +66,8 @@ class GTLightningModule(pl.LightningModule):
                  learning_rate, weight_decay, model='rfat', aggregate='pna',
                  use_rwse=False, rwse_dim=16, use_lappe=False, lappe_dim=16,
                  use_source_rw=False, source_rw_dim=8,
-                 use_rpb=False, rpb_hops=4, rpb_dim=16, exp_degree=4):
+                 use_rpb=False, rpb_hops=4, rpb_dim=16, exp_degree=4,
+                 attn='softmax'):
         super().__init__()
         self.save_hyperparameters()
         rwse = dict(use_rwse=use_rwse, rwse_dim=rwse_dim,
@@ -76,11 +77,12 @@ class GTLightningModule(pl.LightningModule):
             self.model = NBFNet(num_relation, num_layer, hidden_dim, aggregate=aggregate)
         elif model == 'sparse':
             self.model = SparseGraphTransformer(num_relation, num_layer, hidden_dim,
-                                                num_heads, drop, **rwse)
+                                                num_heads, drop, attn=attn, **rwse)
         elif model == 'sparse_exp':
             self.model = SparseExpanderGraphTransformer(num_relation, num_layer, hidden_dim,
                                                         num_heads, drop,
-                                                        exp_degree=exp_degree, **rwse)
+                                                        exp_degree=exp_degree, attn=attn,
+                                                        **rwse)
         elif model == 'sparse_nbfv':
             self.model = SparseNBFValueTransformer(num_relation, num_layer, hidden_dim,
                                                    num_heads, drop, aggregate=aggregate, **rwse)
@@ -179,6 +181,12 @@ def main():
                    choices=['rfat', 'nbfnet', 'sparse', 'sparse_nbfv', 'sparse_exp'])
     p.add_argument('--exp_degree', type=int, default=4,
                    help='Grado del grafo expander (aristas por nodo) para --model sparse_exp.')
+    p.add_argument('--attn', type=str, default='softmax',
+                   choices=['softmax', 'sigmoid', 'degree'],
+                   help='Agregacion de la atencion sparse (sparse/sparse_exp). softmax: '
+                        'segment-softmax (promedio, pierde conteo de caminos); sigmoid: '
+                        'gates sin normalizar => suma ponderada que conserva conteo de '
+                        'caminos y grado (opcion A); degree: softmax x log(1+grado_in).')
     p.add_argument('--aggregate', type=str, default='pna', choices=['pna', 'sum'],
                    help='NBFNet y sparse_nbfv: funcion de agregacion del message passing.')
     p.add_argument('--use_rwse', action='store_true',
@@ -240,7 +248,7 @@ def main():
                               use_lappe=args.use_lappe, lappe_dim=args.lappe_dim,
                               use_source_rw=args.use_source_rw, source_rw_dim=args.source_rw_dim,
                               use_rpb=args.use_rpb, rpb_hops=args.rpb_hops, rpb_dim=args.rpb_dim,
-                              exp_degree=args.exp_degree)
+                              exp_degree=args.exp_degree, attn=args.attn)
 
     ckpt = ModelCheckpoint(dirpath=args.checkpoint_save_path, monitor='valid_mrr',
                            mode='max', save_top_k=1, every_n_epochs=1, verbose=True,
