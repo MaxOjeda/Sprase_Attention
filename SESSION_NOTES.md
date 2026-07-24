@@ -137,6 +137,49 @@ enmascarado de `filtered_ce` nunca toca el gold y baja el CE.
 paquete debería brillar y donde el gap con NBFNet ya era chico: sparse 0.403 vs ~0.415). **Resultados:
 PENDIENTES.** Si `qc` limpio llega a 0.44-0.45 transductivo, es un resultado real de atención pura
 sobre NBFNet; si cae a ~0.41, el grueso del 0.456 viejo era la fuga.
+## 2026-07-22 — Lanzamientos TRANSDUCTIVOS de `degree` (+ primer uso multi-GPU DDP del harness) — RESULTADOS PENDIENTES
+
+**Contexto**: cerrada la opción `degree` en inductivo (fue la mejor variante de atención en FB15k-237 ind v1:
+test 0.366 vs softmax 0.338, ver entrada de abajo), se lleva `--attn degree` al régimen **transductivo** para
+ver si el scaler de grado ayuda ahí. Se lanzaron 3 corridas (todas dim32/L4, lr 1e-3, drop 0.0, seed 42, 20 ep).
+
+**Corridas lanzadas (resultado MRR PENDIENTE, registrar al terminar)**:
+
+| # | job | modelo | dataset | GPUs | batch (global) | ckpt / log |
+|---|-----|--------|---------|-----:|---------------:|------------|
+| 1 | `819321` | sparse **degree** | FB15k-237 trans | 2 (DDP) | **32** (16/GPU) | `experiments/sparse_degree_trans_fb237/` · `logs/degree_trans_fb237_819321.log` |
+| 2 | `819322` | sparse **softmax** | WN18RR trans | 1 | 32 | `experiments/sparse_wn_trans/` · `logs/sparse_wn_trans_819322.log` |
+| 3 | (overlap 812436) | sparse **degree** | WN18RR trans | 1 | 32 | `experiments/sparse_degree_wn_trans/` · `logs/sparse_degree_wn_trans.log` |
+
+Sbatch: `sbatch_degree_trans.sh` (#1, encadenable), `sbatch_sparse_wn_trans.sh` (#2, encadenable),
+`run_degree_wn_trans.sh` (#3, step `srun --overlap`).
+
+**Nota de comparabilidad (importante para leer los números luego)**:
+- El baseline sparse softmax transductivo FB15k-237 **dim32/L4 = test 0.3965 con batch GLOBAL 16**. La corrida
+  #1 usa **batch global 32** (a pedido) ⇒ es un **régimen de batch 2×, NO apples-to-apples en batch** vs 0.3965.
+  Antes de concluir "degree ayuda/no ayuda en transductivo" hay que aislar el efecto batch (correr degree a
+  batch 16 o softmax a batch 32). Anotado en el header del sbatch.
+- #2 y #3 (WN18RR trans) son el par softmax vs degree a **mismo batch 32** ⇒ comparación limpia degree-vs-softmax
+  en WN18RR. No hay baseline softmax previo de WN18RR **transductivo** en la bitácora (los WN18RR anteriores eran
+  inductivos v1) ⇒ #2 crea ese baseline. WN18RR es chico: ~14 min/época, 20 ep en ~4.7h.
+
+**Hallazgo operacional — DDP funciona en este harness (primer uso de `--devices>1`)**: todas las corridas
+previas eran single-GPU. Se verificó que `train.py --devices N` levanta DDP (PL 1.9 + SLURM, backend NCCL, 1
+tarea/GPU vía `srun` con `--ntasks-per-node=N`). **Correctitud del eval bajo DDP confirmada por código**: las
+métricas en `src/metric.py` (MR/MRR/Hits) usan `add_state(..., dist_reduce_fx='sum')` sobre `rank_sum` y `total`
+⇒ agregan bien entre ranks. Para preservar el batch global se usa `batch_size` POR GPU = global/N. Se probó
+2 GPU (~0:42 h/época FB15k-237 trans) y 3 GPU antes de fijar la config; con 3 GPU el batch global 16 no es
+divisible en enteros (16/3) — limitación a recordar si se quiere batch 16 exacto en multi-GPU (usar 2 o 4 GPU).
+
+**Detalle de reuso de GPU (patrón de siempre)**: nodo `compute-gpu-3-1` con 8×H100; en el pico quedó 8/8
+ocupado. La corrida #3 se lanzó reusando la GPU del job **812436** (proceso sparse SIGSTOP'd, PID 2773478,
+retiene la asignación) como step `srun --jobid=812436 --overlap`, sin tocar el proceso detenido — así esa GPU
+pasó de ociosa a útil sin perder la asignación ni esperar cola.
+
+**Decisión**: dejar las 3 corriendo; registrar test_mrr (y valid_mrr) de cada una al terminar. Para #1, al
+comparar contra 0.3965 tener presente la diferencia de batch. Pendiente decidir si se arma watchdog+resume
+(los sbatch #1/#2 ya son encadenables vía `last.ckpt`; #3 depende del wall del 812436, ~13h, suficiente para
+WN18RR).
 
 ---
 

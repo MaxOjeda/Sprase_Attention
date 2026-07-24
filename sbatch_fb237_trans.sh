@@ -13,11 +13,11 @@
 #SBATCH --account=imfd
 #SBATCH --qos=normal
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=2
-#SBATCH --gres=gpu:h100:2
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/autopsy/fb237_trans_%j.log
 
 cd "$SLURM_SUBMIT_DIR"
@@ -35,7 +35,7 @@ export NCCL_DEBUG=WARN
 # devices=2 + srun ntasks=2 => 1 rank por GPU. batch 96/GPU (efectivo 192; README usaba 4 GPUs
 # => efectivo 384, lo anotamos: comparación de baseline, no idéntica).
 srun --cpu-bind=none python main.py \
-  --seed 42 --accelerator gpu --strategy ddp --precision 32 --devices 2 \
+  --seed 42 --accelerator gpu --strategy ddp --precision 32 --devices 1 \
   --max_epochs 20 \
   --checkpoint_save_path ./experiments/autopsy/fb15k237_trans_seed42 \
   --data_path ./data/fb15k-237 \
