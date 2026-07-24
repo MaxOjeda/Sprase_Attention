@@ -90,6 +90,53 @@ in-distribution incluida. Se une a RWSE/LapPE como fuente de señal NO no-redund
 
 ---
 
+## 2026-07-24 — IMPLEMENTADOS: `--attn rel` (ablation de transferencia) y `--attn qc` (paquete QC-Exphormer) + `--filtered_ce` — pendientes de correr
+
+**Contexto 1 — el ablation `rel`**: tras refutar A (normalización) y C (anclar a mean-pool), el
+sospechoso restante del overfit del sparse es el **término `⟨q_dst, k_src⟩` del logit**: es la única
+parte que depende de los **estados ocultos de nodo**, cuya distribución cambia en el grafo de test
+disjunto. El canal relacional `b[head, rel]`, en cambio, se comparte train/test por construcción.
+`--attn rel` **elimina `q·k`** y deja el logit puramente relacional:
+`a_e = b[head,rel] + ⟨u[head,r_q], w[head,rel]⟩/√d` (compatibilidad query×relación aprendida). Sigue
+siendo atención aprendida y compite entre vecinos, pero con la transferibilidad de NBFNet. La capa en
+este modo **ni siquiera crea** `to_q`/`to_k`. Predicción falsable: si `rel` recupera la zona de NBFNet
+(~0.45) el overfit estaba localizado en `q·k` (hallazgo publicable: *la atención en KGC inductivo
+falla por sus logits dependientes de estado, no por ser atención*); si se queda en ~0.34, la
+agregación aprendida per se queda refutada y la línea sparse se cierra con diagnóstico completo.
+
+**Contexto 2 — el paquete `qc`**: del proyecto viejo (Exphormer_Max) se recuperó la arquitectura del
+run FB15k-237 transductivo que marcaba **0.456**. Análisis de ese código (ver abajo): el número **NO
+es comparable al SOTA** porque su loss de train filtraba con `all_triples_filter` = train+**val+test**
+(`losses.py::kgc_full_graph_ce` líneas 39-50, alimentado desde `trainer.py:429`) ⇒ las respuestas del
+test nunca eran penalizadas como negativos: **fuga de labels**. La selección de modelo sí era legítima
+(por val). Pero el *paquete arquitectónico* es legítimo y coincide punto por punto con los diagnósticos
+de este harness: (i) **suma-exp sin normalizar** `exp(clip(·,±5))` sin `/Z`; (ii) **Q anclado a x⁰**
+(no lee `h` ⇒ mata medio canal dependiente de estado); (iii) **logit trilineal** `(q⊙k⊙e[rel])·1` con
+relación **vectorial** en vez de bias escalar; (iv) **query conditioning** `c_q` sumado a q/k/e (el
+sparse actual NO condiciona la atención a `r_q` — solo entra por x⁰); (v) **residual Bellman-Ford**
+`x += x⁰` por capa. `--attn qc` porta los cinco al harness limpio.
+
+**Contexto 3 — `--filtered_ce`**: versión SIN fuga del truco del proyecto viejo. Excluye del
+denominador del CE las otras respuestas conocidas **solo de train** de la query (h,r) — multi-answer
+label handling estándar. Usa el `filter_mask` que `train_collate_fn` ya construye desde
+`data.train_filters` (solo triplets de train). Aplica a todos los modelos ⇒ **para comparar hay que
+re-correr también el baseline NBFNet con el flag**.
+
+**Implementación (HECHA, sin correr)**: `src/model.py::SparseRelationalAttentionLayer` (branches `rel`
+y `qc` en el logit y en la agregación; parámetros nuevos `rel_att_q/rel_att_k` para `rel`,
+`rel_e/q_rel_emb/proj_{q,k,e}` para `qc`), threading de `x0`/`r_index` por `SparseGraphTransformer` y
+`SparseExpanderGraphTransformer` (+ residual BF cuando `attn=='qc'`), `--attn {…,rel,qc}` y
+`--filtered_ce` en `train.py`. Default `softmax` sin `--filtered_ce` ⇒ **comportamiento previo
+intacto**. Smoke test CPU: los 6 modos × 2 modelos hacen forward/backward con scores finitos; `rel` no
+tiene `to_q`/`to_k` y sus tablas relacionales reciben gradiente; `rel` y `qc` cambian el score al
+cambiar `r_q` (query-conditioned de verdad); los 6 modos difieren entre sí con la misma semilla; el
+enmascarado de `filtered_ce` nunca toca el gold y baja el CE.
+
+**Experimentos planificados**: `run_rel_v1.sh` (ind v1, diagnóstico, ~40 min), `run_qc_v1.sh` (ind v1),
+`run_qc_trans.sh` (FB15k-237 transductivo, L5/dim64/lr 2e-4 alineado al config viejo — es donde el
+paquete debería brillar y donde el gap con NBFNet ya era chico: sparse 0.403 vs ~0.415). **Resultados:
+PENDIENTES.** Si `qc` limpio llega a 0.44-0.45 transductivo, es un resultado real de atención pura
+sobre NBFNet; si cae a ~0.41, el grueso del 0.456 viejo era la fuga.
 ## 2026-07-22 — Lanzamientos TRANSDUCTIVOS de `degree` (+ primer uso multi-GPU DDP del harness) — RESULTADOS PENDIENTES
 
 **Contexto**: cerrada la opción `degree` en inductivo (fue la mejor variante de atención en FB15k-237 ind v1:

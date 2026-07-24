@@ -67,7 +67,7 @@ class GTLightningModule(pl.LightningModule):
                  use_rwse=False, rwse_dim=16, use_lappe=False, lappe_dim=16,
                  use_source_rw=False, source_rw_dim=8,
                  use_rpb=False, rpb_hops=4, rpb_dim=16, exp_degree=4,
-                 attn='softmax'):
+                 attn='softmax', filtered_ce=False):
         super().__init__()
         self.save_hyperparameters()
         rwse = dict(use_rwse=use_rwse, rwse_dim=rwse_dim,
@@ -117,7 +117,17 @@ class GTLightningModule(pl.LightningModule):
         batched_data = self.remove_edge(batched_data)
         score = self.model(batched_data)                          # (B, N)
         # CE de grafo completo: el gold es t_index; las demas entidades son negativos.
-        loss = F.cross_entropy(score, batched_data['t_index'])
+        t_index = batched_data['t_index']
+        if self.hparams.filtered_ce:
+            # CE filtrado SOLO-train: las otras respuestas conocidas EN TRAIN de la
+            # misma query (h, r) salen del denominador (multi-answer label handling).
+            # 'filter_mask' del train_collate_fn viene de data.train_filters (solo
+            # triplets de train) => NO hay fuga de val/test, a diferencia del pipeline
+            # de Exphormer_Max que filtraba con train+val+test.
+            filt = batched_data['filter_mask'].bool().clone()
+            filt[torch.arange(filt.size(0), device=filt.device), t_index] = False
+            score = score.masked_fill(filt, float('-inf'))
+        loss = F.cross_entropy(score, t_index)
         self.log('train_loss', loss, prog_bar=True)
         self.log('mem_gb', torch.cuda.max_memory_allocated() / 1024**3, prog_bar=True)
         return loss
@@ -182,13 +192,21 @@ def main():
     p.add_argument('--exp_degree', type=int, default=4,
                    help='Grado del grafo expander (aristas por nodo) para --model sparse_exp.')
     p.add_argument('--attn', type=str, default='softmax',
-                   choices=['softmax', 'sigmoid', 'degree', 'anchor'],
-                   help='Agregacion de la atencion sparse (sparse/sparse_exp). softmax: '
-                        'segment-softmax (promedio, pierde conteo de caminos); sigmoid: '
-                        'gates sin normalizar => suma ponderada que conserva conteo de '
+                   choices=['softmax', 'sigmoid', 'degree', 'anchor', 'rel', 'qc'],
+                   help='Agregacion/parametrizacion de la atencion sparse (sparse/sparse_exp). '
+                        'softmax: segment-softmax (promedio, pierde conteo de caminos); '
+                        'sigmoid: gates sin normalizar => suma ponderada que conserva conteo de '
                         'caminos y grado (opcion A); degree: softmax x log(1+grado_in); '
                         'anchor: interpola softmax con la media uniforme via lambda aprendido '
-                        'por cabeza => regulariza hacia la agregacion fija (opcion C).')
+                        'por cabeza => regulariza hacia la agregacion fija (opcion C); '
+                        'rel: ABLATION sin termino q.k => logit puramente relacional '
+                        '(b[head,rel] + compatibilidad r_q x rel), transferible por construccion; '
+                        'qc: paquete QC-Exphormer (Q anclado a x0, logit trilineal con relacion '
+                        'vectorial, conditioning c_q en q/k/e, exp-suma sin normalizar + residual BF).')
+    p.add_argument('--filtered_ce', action='store_true',
+                   help='CE filtrado solo-train: excluye del denominador las otras respuestas '
+                        'conocidas EN TRAIN de la query (h, r). Sin fuga de val/test. Aplica a '
+                        'todos los modelos; para comparar hay que re-correr el baseline con el flag.')
     p.add_argument('--aggregate', type=str, default='pna', choices=['pna', 'sum'],
                    help='NBFNet y sparse_nbfv: funcion de agregacion del message passing.')
     p.add_argument('--use_rwse', action='store_true',
@@ -250,7 +268,8 @@ def main():
                               use_lappe=args.use_lappe, lappe_dim=args.lappe_dim,
                               use_source_rw=args.use_source_rw, source_rw_dim=args.source_rw_dim,
                               use_rpb=args.use_rpb, rpb_hops=args.rpb_hops, rpb_dim=args.rpb_dim,
-                              exp_degree=args.exp_degree, attn=args.attn)
+                              exp_degree=args.exp_degree, attn=args.attn,
+                              filtered_ce=args.filtered_ce)
 
     ckpt = ModelCheckpoint(dirpath=args.checkpoint_save_path, monitor='valid_mrr',
                            mode='max', save_top_k=1, every_n_epochs=1, verbose=True,

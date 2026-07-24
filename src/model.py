@@ -579,12 +579,25 @@ class SparseRelationalAttentionLayer(nn.Module):
         igual entre aristas entrantes (= agregacion media fija, la que transfiere).
         lambda->0 recupera la media GNN; lambda->1 la atencion aprendida. Regulariza
         hacia la agregacion fija para atacar la firma de overfit valid^/test_ (opcion C).
+      - 'rel': ablation de transferencia. ELIMINA el termino q.k (dependiente de los
+        estados de nodo, cuyo overfit al train graph es el sospechoso dominante) y deja
+        el logit puramente relacional: b[head,rel] + <u[head,r_q], w[head,rel]>/sqrt(d)
+        (compatibilidad query-relacion aprendida). Todo a nivel de relacion => se
+        comparte train/test por construccion, misma transferibilidad que NBFNet.
+        Segment-softmax estandar. Si recupera la zona de NBFNet, el overfit estaba en
+        q.k; si no, la agregacion aprendida per se queda refutada.
+      - 'qc': paquete QC-Exphormer (port del proyecto Exphormer_Max, run trans 0.456
+        pre-fuga): (i) Q anclado a x0 (boundary condition, NO lee h acumulada);
+        (ii) logit TRILINEAL (q (.) k (.) e[rel]).1 con relacion vectorial e[rel] en vez
+        de bias escalar; (iii) conditioning aditivo c_q = emb_capa(r_q) sumado a q/k/e;
+        (iv) agregacion exp(clip(logit,+-5)) + SUMA sin normalizar (NBFNet-style).
+        El modelo ademas aplica residual Bellman-Ford (x += x0 por capa) en este modo.
     """
 
     def __init__(self, hidden_dim, num_heads, num_relation, drop, attn='softmax'):
         super().__init__()
         assert hidden_dim % num_heads == 0
-        assert attn in ('softmax', 'sigmoid', 'degree', 'anchor')
+        assert attn in ('softmax', 'sigmoid', 'degree', 'anchor', 'rel', 'qc')
         self.attn = attn
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -596,8 +609,10 @@ class SparseRelationalAttentionLayer(nn.Module):
 
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
-        self.to_q = nn.Linear(hidden_dim, hidden_dim)
-        self.to_k = nn.Linear(hidden_dim, hidden_dim)
+        # 'rel' no usa el termino q.k => no crea las proyecciones (quedarian muertas).
+        if attn != 'rel':
+            self.to_q = nn.Linear(hidden_dim, hidden_dim)
+            self.to_k = nn.Linear(hidden_dim, hidden_dim)
         self.to_v = nn.Linear(hidden_dim, hidden_dim)
         self.to_out = nn.Linear(hidden_dim, hidden_dim)
 
@@ -609,31 +624,78 @@ class SparseRelationalAttentionLayer(nn.Module):
         if attn == 'anchor':
             self.anchor_logit = nn.Parameter(torch.zeros(num_heads))
 
+        # 'rel': tablas de compatibilidad query-relacion (init chico => logit ~ 0
+        # => arranca como softmax(b[head,rel]), cuasi-uniforme como el base).
+        if attn == 'rel':
+            self.rel_att_q = nn.Parameter(
+                torch.randn(num_heads, num_relation, self.head_dim) * 0.01)
+            self.rel_att_k = nn.Parameter(
+                torch.randn(num_heads, R, self.head_dim) * 0.01)
+
+        # 'qc': relacion vectorial del logit trilineal (init unos => al inicio el
+        # logit se reduce a q.k estandar) + conditioning c_q con proyecciones
+        # near-zero (receta QC-Exphormer: estable al arranque).
+        if attn == 'qc':
+            self.rel_e = nn.Parameter(torch.ones(num_heads, R, self.head_dim))
+            self.q_rel_emb = nn.Embedding(num_relation, hidden_dim)
+            nn.init.normal_(self.q_rel_emb.weight, std=0.01)
+            self.proj_q = nn.Linear(hidden_dim, hidden_dim, bias=False)
+            self.proj_k = nn.Linear(hidden_dim, hidden_dim, bias=False)
+            self.proj_e = nn.Linear(hidden_dim, hidden_dim, bias=False)
+            for m in (self.proj_q, self.proj_k, self.proj_e):
+                nn.init.normal_(m.weight, std=0.01)
+
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2), nn.GELU(),
             nn.Dropout(drop), nn.Linear(hidden_dim * 2, hidden_dim),
         )
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x, edges):
-        """edges: (src, rel, dst) YA aumentadas con self-loops (rel==self_rel)."""
+    def forward(self, x, edges, x0=None, r_index=None):
+        """edges: (src, rel, dst) YA aumentadas con self-loops (rel==self_rel).
+        x0 (B,N,D) es el estado inicial (labeling trick) y r_index (B,) la relacion
+        de la query; solo los usan los modos 'qc' (Q anclado a x0 + c_q) y 'rel' (c_q).
+        Los demas modos los ignoran."""
         B, N, D = x.shape
         H, hd = self.num_heads, self.head_dim
         src, rel, dst = edges
         E = src.size(0)
 
         h = self.norm1(x)
-        q = self.to_q(h).view(B, N, H, hd)
-        k = self.to_k(h).view(B, N, H, hd)
         v = self.to_v(h).view(B, N, H, hd)
 
-        # Logit por arista: (q_dst . k_src)/sqrt(d) + bias relacional. (B, E, H)
-        logit = (q[:, dst] * k[:, src]).sum(-1) * self.scale
-        logit = logit + self.rel_bias[:, rel].transpose(0, 1).unsqueeze(0)  # (1,E,H)
+        if self.attn == 'rel':
+            # Logit SIN estados de nodo: bias relacional + compatibilidad (r_q, rel).
+            cq = self.rel_att_q[:, r_index, :]                       # (H, B, hd)
+            ck = self.rel_att_k[:, rel, :]                           # (H, E, hd)
+            logit = torch.einsum('hbd,hed->beh', cq, ck) * self.scale  # (B, E, H)
+            logit = logit + self.rel_bias[:, rel].transpose(0, 1).unsqueeze(0)
+        elif self.attn == 'qc':
+            # Trilineal QC-Exphormer: Q desde x0 (no lee h), e[rel] vectorial,
+            # conditioning aditivo c_q en los tres canales.
+            q = self.to_q(x0).view(B, N, H, hd)
+            k = self.to_k(h).view(B, N, H, hd)
+            cq = self.q_rel_emb(r_index)                             # (B, D)
+            qc = self.proj_q(cq).view(B, 1, H, hd)
+            kc = self.proj_k(cq).view(B, 1, H, hd)
+            ec = self.proj_e(cq).view(B, 1, H, hd)
+            e = self.rel_e[:, rel, :].permute(1, 0, 2).unsqueeze(0)  # (1, E, H, hd)
+            logit = ((q[:, dst] + qc) * (k[:, src] + kc)
+                     * (e + ec)).sum(-1) * self.scale                # (B, E, H)
+        else:
+            q = self.to_q(h).view(B, N, H, hd)
+            k = self.to_k(h).view(B, N, H, hd)
+            # Logit por arista: (q_dst . k_src)/sqrt(d) + bias relacional. (B, E, H)
+            logit = (q[:, dst] * k[:, src]).sum(-1) * self.scale
+            logit = logit + self.rel_bias[:, rel].transpose(0, 1).unsqueeze(0)
 
         if self.attn == 'sigmoid':
             # Gate por arista, sin normalizacion (no necesita estabilizacion por max).
             alpha = torch.sigmoid(logit)                            # (B, E, H)
+        elif self.attn == 'qc':
+            # exp-suma sin normalizar (QC-Exphormer / NBFNet-style); el clip +-5
+            # (mismo de Exphormer_Max) acota el rango sin necesitar max-subtract.
+            alpha = torch.exp(logit.clamp(-5.0, 5.0))               # (B, E, H)
         else:
             # Segment-softmax por nodo destino (sobre sus aristas entrantes + self-loop).
             idx = dst.view(1, E, 1).expand(B, E, H)
@@ -687,6 +749,7 @@ class SparseGraphTransformer(nn.Module):
         self.lappe_dim = lappe_dim
         self.use_source_rw = use_source_rw
         self.source_rw_dim = source_rw_dim
+        self.attn = attn
         self.query_emb = nn.Embedding(num_relation, hidden_dim)
         if use_rwse:
             self.rwse_proj = nn.Linear(rwse_dim, hidden_dim)
@@ -736,8 +799,13 @@ class SparseGraphTransformer(nn.Module):
             x = x + source_rw_features(graph, device, self.source_rw_dim,
                                        self.source_rw_proj, h_index)
 
+        x0 = x
         for layer in self.layers:
-            x = layer(x, edges)
+            x = layer(x, edges, x0=x0, r_index=r_index)
+            if self.attn == 'qc':
+                # Residual Bellman-Ford (QC-Exphormer): reinyecta la condicion de
+                # frontera en cada capa para que la fuente no pierda la senal de query.
+                x = x + x0
 
         x = self.norm_out(x)
         return self.readout(x).squeeze(-1)
@@ -795,6 +863,7 @@ class SparseExpanderGraphTransformer(nn.Module):
         self.exp_rel = num_relation + 1        # relacion reservada de las aristas expander
         self.exp_degree = exp_degree
         self.exp_seed = exp_seed
+        self.attn = attn
         self.use_rwse = use_rwse
         self.rwse_dim = rwse_dim
         self.use_lappe = use_lappe
@@ -864,8 +933,13 @@ class SparseExpanderGraphTransformer(nn.Module):
             x = x + source_rw_features(graph, device, self.source_rw_dim,
                                        self.source_rw_proj, h_index)
 
+        x0 = x
         for layer in self.layers:
-            x = layer(x, edges)
+            x = layer(x, edges, x0=x0, r_index=r_index)
+            if self.attn == 'qc':
+                # Residual Bellman-Ford (QC-Exphormer): reinyecta la condicion de
+                # frontera en cada capa para que la fuente no pierda la senal de query.
+                x = x + x0
 
         x = self.norm_out(x)
         return self.readout(x).squeeze(-1)
